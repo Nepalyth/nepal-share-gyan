@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+primaryColor = "#3b6cff"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+# MeroShare results are private, so only serve this machine.
+address = "127.0.0.1"
