@@ -14,12 +14,18 @@ env/
 
 # uv
 .uv/
+.uv-cache/
+uv.lock
 
 # Streamlit
 .streamlit/secrets.toml
 
-# Environment variables
+# Environment variables (keep the example file)
 .env
+.env.*
+.env *
+*.env
+!.env.example
 
 # Editor / OS
 .vscode/
