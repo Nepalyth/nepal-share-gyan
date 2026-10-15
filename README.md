@@ -42,15 +42,31 @@ The light/dark switch in the header is stored in the URL (`?theme=dark`).
 
 ## IPO results from your MeroShare account
 
-The MeroShare page signs in to your account and shows your details, portfolio and ASBA applications with allotment results (also summarised on IPO Results). Either fill in the sign-in form (kept in memory for the browser session only) or use a `.env` file:
+The MeroShare page signs in to your account and shows your details, portfolio and ASBA applications with allotment results (also summarised on IPO Results), and lets you apply for open IPOs from the Apply IPO tab. Either fill in the sign-in form (kept in memory for the browser session only) or use a `.env` file:
 
 ```bash
-cp .env.example .env   # then fill in MEROSHARE_DP, MEROSHARE_USERNAME, MEROSHARE_PASSWORD
+cp .env.example .env   # then fill in MEROSHARE_DP, MEROSHARE_USERNAME, MEROSHARE_PASSWORD (and MEROSHARE_CRN to apply for IPOs)
 ```
 
 * `.env` is git-ignored. Restart the app after editing it.
 * The login goes only to `webbackend.cdsc.com.np`, is never logged or displayed, and nothing is stored on disk.
 * The server is bound to `127.0.0.1` (see `.streamlit/config.toml`) because the page shows private account data. Do not expose it publicly.
+
+## WhatsApp alerts for open IPOs and debentures
+
+`notify-ipo` checks ShareSansar and sends a WhatsApp message through [Twilio](https://www.twilio.com/whatsapp) when a new IPO or debenture opens. Each issue is announced once (tracked in `.notify_state.json`).
+
+1. In the Twilio Console, open the WhatsApp sandbox and join it by sending `join <your-code>` from your phone to the sandbox number. Re-join if the session expires.
+2. Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `WHATSAPP_PHONE` (international format, no `+`; separate several numbers with commas, each must join the sandbox) in `.env`. `TWILIO_WHATSAPP_FROM` defaults to the sandbox number.
+3. Test it, then schedule it:
+
+```bash
+uv sync
+uv run notify-ipo --test      # sends a test message
+uv run notify-ipo --dry-run   # prints what would be sent
+crontab -e                    # e.g. every 30 minutes:
+# */30 * * * * cd /path/to/share-gyan && uv run notify-ipo >> notify.log 2>&1
+```
 
 ## Screenshots
 

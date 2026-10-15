@@ -1,6 +1,7 @@
-"""Read-only MeroShare client: the signed-in user's profile, portfolio and ASBA applications.
+"""MeroShare client: the signed-in user's profile, portfolio, ASBA applications and IPO applications.
 
 Credentials come from the environment (.env) or the sign-in form and are only sent to CDSC's MeroShare API.
+The only write action is apply_ipo(), which the UI calls after an explicit confirmation.
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ class Account:
     applications: pd.DataFrame
     errors: dict[str, str] = field(default_factory=dict)
     fetched_at: datetime = field(default_factory=datetime.now)
+    issues: pd.DataFrame = field(default_factory=pd.DataFrame)
+    bank_accounts: list[dict] = field(default_factory=list)
 
 
 def _load_env() -> None:
@@ -73,6 +76,11 @@ def env_dp() -> str:
     return os.getenv("MEROSHARE_DP", "").strip()
 
 
+def env_crn() -> str:
+    _load_env()
+    return os.getenv("MEROSHARE_CRN", "").strip()
+
+
 def mask(value: str, keep: int = 4) -> str:
     value = str(value or "")
     return f"{value[:keep]}{'•' * max(len(value) - 2 * keep, 0)}{value[-keep:]}" if len(value) > 2 * keep else value
@@ -94,12 +102,12 @@ def _json(resp: requests.Response, action: str):
         raise MeroshareError(f"{action} failed: MeroShare returned an unreadable response (it may be blocking automated requests).") from None
 
 
-def _request(session: requests.Session, method: str, path: str, action: str, base: str = API, **kwargs):
+def _request(session: requests.Session, method: str, path: str, action: str, base: str = API, ok: tuple[int, ...] = (200,), **kwargs):
     try:
         resp = session.request(method, f"{base}/{path}", timeout=_TIMEOUT, **kwargs)
     except requests.RequestException as exc:
         raise MeroshareError(f"Could not reach MeroShare ({type(exc).__name__}).") from None
-    if resp.status_code != 200:
+    if resp.status_code not in ok:
         raise _fail(resp, action)
     return resp
 
@@ -182,12 +190,27 @@ def _details(own: dict, dp: dict, username: str) -> dict:
     }
 
 
-def _banks(session: requests.Session) -> pd.DataFrame:
-    rows = []
+def _bank_accounts(session: requests.Session) -> list[dict]:
+    out = []
     for bank in _json(_request(session, "GET", "bank/", "Loading banks"), "Loading banks"):
         accounts = _json(_request(session, "GET", f"bank/{bank['id']}", "Loading bank accounts"), "Loading bank accounts")
         for acc in accounts if isinstance(accounts, list) else [accounts]:
-            rows.append({"Bank": bank.get("name", ""), "Account number": str(acc.get("accountNumber", "")), "Branch": str(acc.get("branchName") or acc.get("branchId") or "")})
+            out.append(
+                {
+                    "bank": bank.get("name", ""),
+                    "bank_id": bank["id"],
+                    "customer_id": acc.get("id"),
+                    "account_number": str(acc.get("accountNumber", "")),
+                    "branch": str(acc.get("branchName") or acc.get("branchId") or ""),
+                    "branch_id": acc.get("accountBranchId") or acc.get("branchId"),
+                    "account_type_id": acc.get("accountTypeId"),
+                }
+            )
+    return out
+
+
+def _banks_frame(accounts: list[dict]) -> pd.DataFrame:
+    rows = [{"Bank": a["bank"], "Account number": a["account_number"], "Branch": a["branch"]} for a in accounts]
     return pd.DataFrame(rows, columns=["Bank", "Account number", "Branch"])
 
 
@@ -262,6 +285,52 @@ def _applications(session: requests.Session, limit: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Symbol", "Company", "Type", "Applied", "Allotted", "Form status", "Result", "Remark"])
 
 
+_ISSUE_COLUMNS = ["Id", "Symbol", "Company", "Group", "Min units", "Max units", "Multiple of", "Price", "Applied"]
+_ISSUES_SEARCH = {
+    "filterFieldParams": [
+        {"key": "companyIssue.companyISIN.script", "alias": "Scrip"},
+        {"key": "companyIssue.companyISIN.company.name", "alias": "Company Name"},
+    ],
+    "page": 1,
+    "size": 20,
+    "searchRoleViewConstants": "VIEW_APPLICABLE_SHARE",
+    "filterDateParams": [
+        {"key": "minIssueOpenDate", "condition": "", "alias": "", "value": ""},
+        {"key": "maxIssueCloseDate", "condition": "", "alias": "", "value": ""},
+    ],
+}
+
+
+def _issues(session: requests.Session) -> pd.DataFrame:
+    """Open IPOs this account can apply for, with unit limits where MeroShare provides them."""
+    body = _json(_request(session, "POST", "companyShare/applicableIssue/", "Loading open issues", json=_ISSUES_SEARCH), "Loading open issues")
+    rows = []
+    for item in body.get("object", []):
+        if (item.get("shareTypeName") or "").strip().upper() != "IPO":
+            continue
+        info: dict = {}
+        try:
+            resp = session.get(f"{API}/active/{item['companyShareId']}", timeout=_TIMEOUT)
+            info = resp.json() if resp.status_code == 200 else {}
+        except (requests.RequestException, ValueError):
+            pass
+        rows.append(
+            {
+                "Id": item["companyShareId"],
+                "Symbol": item.get("scrip", ""),
+                "Company": item.get("companyName", ""),
+                "Group": item.get("shareGroupName") or item.get("subGroup") or "",
+                "Min units": info.get("minUnit"),
+                "Max units": info.get("maxUnit"),
+                "Multiple of": info.get("multipleOf"),
+                "Price": info.get("sharePerUnit"),
+                # Any action other than apply/reapply means a form already exists for this issue.
+                "Applied": (item.get("action") or "").strip().lower() not in ("", "apply", "reapply"),
+            }
+        )
+    return pd.DataFrame(rows, columns=_ISSUE_COLUMNS)
+
+
 def _section(errors: dict, name: str, fn: Callable, default):
     try:
         return fn()
@@ -276,9 +345,43 @@ def fetch_account(creds: Credentials, limit: int = 20) -> Account:
     errors: dict[str, str] = {}
     try:
         own = _json(_request(session, "GET", "ownDetail/", "Loading your profile"), "Loading your profile")
-        banks = _section(errors, "banks", lambda: _banks(session), pd.DataFrame(columns=["Bank", "Account number", "Branch"]))
+        bank_accounts = _section(errors, "banks", lambda: _bank_accounts(session), [])
         portfolio, totals = _section(errors, "portfolio", lambda: _portfolio(session, own), (pd.DataFrame(), {}))
         applications = _section(errors, "applications", lambda: _applications(session, limit), pd.DataFrame())
+        issues = _section(errors, "issues", lambda: _issues(session), pd.DataFrame(columns=_ISSUE_COLUMNS))
     finally:
         session.close()
-    return Account(_details(own, dp, creds.username), banks, portfolio, totals, applications, errors)
+    return Account(_details(own, dp, creds.username), _banks_frame(bank_accounts), portfolio, totals, applications, errors, issues=issues, bank_accounts=bank_accounts)
+
+
+def apply_ipo(creds: Credentials, company_share_id: int, bank: dict, units: int, crn: str, pin: str) -> str:
+    """Submit an IPO application (this blocks money in the chosen bank account). Returns MeroShare's confirmation message."""
+    crn, pin = crn.strip(), pin.strip()
+    if units < 1:
+        raise MeroshareError("Enter the number of units to apply for.")
+    if not crn:
+        raise MeroshareError("CRN is missing. Set MEROSHARE_CRN in .env or enter it in the form.")
+    if not (pin.isdigit() and len(pin) == 4):
+        raise MeroshareError("The transaction PIN must be 4 digits.")
+    session, _dp = _login(creds)
+    try:
+        own = _json(_request(session, "GET", "ownDetail/", "Loading your profile"), "Loading your profile")
+        demat = str(_first(own, "demat"))
+        body = {
+            "demat": demat,
+            "boid": str(_first(own, "boid", default=demat[-8:])),
+            "accountNumber": bank["account_number"],
+            "customerId": bank["customer_id"],
+            "accountBranchId": bank["branch_id"],
+            "accountTypeId": bank["account_type_id"],
+            "appliedKitta": str(units),
+            "crnNumber": crn,
+            "transactionPIN": pin,
+            "companyShareId": str(company_share_id),
+            "bankId": bank["bank_id"],
+        }
+        resp = _request(session, "POST", "applicantForm/share/apply", "Applying for the IPO", ok=(200, 201), json=body)
+        message = _json(resp, "Applying for the IPO").get("message") if resp.content else None
+    finally:
+        session.close()
+    return (message or "Application submitted.").rstrip(". ") + "."

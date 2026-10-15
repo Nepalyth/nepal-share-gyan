@@ -20,6 +20,9 @@ uv.lock
 # Streamlit
 .streamlit/secrets.toml
 
+# IPO notification state
+.notify_state.json
+
 # Environment variables (keep the example file)
 .env
 .env.*

@@ -1,0 +1,30 @@
+name: IPO alerts
+
+on:
+  schedule:
+    # 09:00 NPT (UTC+5:45) = 03:15 UTC
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      # Unique key per run so the updated state is always saved; restore-keys picks up the latest one.
+      - uses: actions/cache@v4
+        with:
+          path: .notify_state.json
+          key: notify-state-${{ github.run_id }}
+          restore-keys: notify-state-
+
+      - run: uv run notify-ipo
+        env:
+          NOTIFY_STATE_FILE: ${{ github.workspace }}/.notify_state.json
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_WHATSAPP_FROM: ${{ secrets.TWILIO_WHATSAPP_FROM }}
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
