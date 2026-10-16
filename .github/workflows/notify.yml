@@ -1,9 +1,6 @@
 name: IPO alerts
 
 on:
-  schedule:
-    # 09:00 NPT (UTC+5:45) = 03:15 UTC
-    - cron: "15 3 * * *"
   workflow_dispatch:
 
 jobs:
